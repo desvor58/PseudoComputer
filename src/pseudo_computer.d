@@ -14,15 +14,17 @@ static Reg dx;
 static ushort CS = 0;
 static ushort DS = 0;
 static ushort SS = 0;
+static ushort ES = 0;
 
-static ushort IP = 0;
+static ushort IP  = 0;
 static ushort RSP = 0;
+static ushort RBP = 0;
 
 byte[] mem;
 
 int main(string[] args)
 {
-    ubyte[] disk = cast(ubyte[])read(args[1]);
+    ubyte[] start_program = cast(ubyte[])read(args[1]);
 
     ax = new Reg();
     bx = new Reg();
@@ -31,44 +33,71 @@ int main(string[] args)
 
     mem.length = 4_294_967_296;
 
-    for (int i = 0; i < sector_size; i++) {
-        mem[i] = disk[i];
+    ushort current_segment = 0;
+
+    int addr = 0;
+    for (int i = 0; i < start_program.length; i++, addr++) {
+        if (start_program[i] == 0xFF) {
+            if (start_program[i + 1] == 0xAA) {
+                current_segment++;
+                addr = 0;
+            }
+        }
+        mem[(current_segment*segment_size) + addr] = start_program[i];
+    }
+    for (int i = 0; i < 8; i++) {
+        std.file.write(format("mem%x.txt", i), mem[segment_size*i..segment_size*(i+1)]);
     }
 
-    execute();
+    writeln(format("\n %X \n", mem[segment_size]));
+    
+   bool dbgmode = false;
+    if (args[2] == "debug") {
+        dbgmode = true;
+    }
+    execute(dbgmode);
 
+    print_regs();
+
+    return 0;
+}
+
+void print_regs()
+{
     writeln(format("ax: %d h: %d l: %d", ax.x, ax.h, ax.l));
     writeln(format("bx: %d h: %d l: %d", bx.x, bx.h, bx.l));
     writeln(format("cx: %d h: %d l: %d", cx.x, cx.h, cx.l));
     writeln(format("dx: %d h: %d l: %d", dx.x, dx.h, dx.l));
     writeln();
-    write("CS: ");  write(CS); write(", DS: "); write(DS); write(", SS: "); writeln(SS);
+    write("CS: ");  write(CS); write(", DS: "); write(DS); write(", SS: "); write(SS); write(", ES: "); writeln(ES);
     write("RSP: "); write(RSP); write(", IP: "); write(IP);
-
-    return 0;
 }
 
-void execute()
+void execute(bool debug_mode)
 {
-    SS  = cast(short)(CS + 1);
-    RSP = segment_size - 1;
-
     ubyte comm;
     ubyte arg1;
     ubyte arg2;
     ubyte arg3;
 
+    int exeret = 0;
     for (; IP < segment_size - 4; IP += 4) {
-        comm = mem[CS + IP];
-        arg1 = mem[CS + IP + 1];
-        arg2 = mem[CS + IP + 2];
-        arg3 = mem[CS + IP + 3];
+        comm = mem[CS*segment_size + IP];
+        arg1 = mem[CS*segment_size + IP + 1];
+        arg2 = mem[CS*segment_size + IP + 2];
+        arg3 = mem[CS*segment_size + IP + 3];
 
-        execute_comm(comm, arg1, arg2, arg3);
+        exeret = execute_comm(comm, arg1, arg2, arg3);
+        if (debug_mode) {
+            writeln(format("%X %X %X %X", comm, arg1, arg2, arg3));
+            print_regs();
+            getchar();
+            writeln();
+        }
     }
 }
 
-void execute_comm(ubyte comm, ubyte arg1, ubyte arg2, ubyte arg3)
+int execute_comm(ubyte comm, ubyte arg1, ubyte arg2, ubyte arg3)
 {
     switch (comm) {
         case 0x00:                  /* MOV */
@@ -129,8 +158,18 @@ void execute_comm(ubyte comm, ubyte arg1, ubyte arg2, ubyte arg3)
         case 0x09:                 /* JMP */
             IP = cast(ushort)((arg1 << 8) + arg2 - 4);
             break;
+        case 0x49:                 /* JMPE */
+            CS = ES;
+            IP = cast(ushort)((arg1 << 8) + arg2 - 4);
+            break;
         case 0x0A:                 /* JEZ */
             if (get(arg1) == 0) {
+                IP = cast(ushort)((arg2 << 8) + arg3 - 4);
+            }
+            break;
+        case 0x4A:                 /* JEZE */
+            if (get(arg1) == 0) {
+                CS = ES;
                 IP = cast(ushort)((arg2 << 8) + arg3 - 4);
             }
             break;
@@ -139,44 +178,75 @@ void execute_comm(ubyte comm, ubyte arg1, ubyte arg2, ubyte arg3)
                 IP = cast(ushort)((arg2 << 8) + arg3 - 4);
             }
             break;
+        case 0x4B:                 /* JGZE */
+            if (get(arg1) > 0) {
+                CS = ES;
+                IP = cast(ushort)((arg2 << 8) + arg3 - 4);
+            }
+            break;
         case 0x0C:                 /* JLZ */
             if (get(arg1) < 0) {
                 IP = cast(ushort)((arg2 << 8) + arg3 - 4);
             }
             break;
+        case 0x4C:                 /* JLZE */
+            if (get(arg1) < 0) {
+                CS = ES;
+                IP = cast(ushort)((arg2 << 8) + arg3 - 4);
+            }
+            break;
+        
+        case 0x0D:                 /* MOVM */
+            mem[ES + get(arg1)] = cast(byte)get(arg2);
+            break;
+        case 0x8D:                 /* MOVMC */
+            mem[ES + get(arg1)] = arg2;
+            break;
+        case 0x4D:                 /* MOVA */
+            mem[ES + (arg1 << 8) + arg2] = cast(byte)get(arg3);
+            break;
+        case 0xCD:                 /* MOVAC */
+            mem[ES + (arg1 << 8) + arg2] = arg3;
+            break;
+        case 0x0E:                 /* MOVR */
+            set(arg1, cast(short)(mem[ES + get(arg2)]));
+            break;
+        case 0x8E:                 /* MOVRA/MOVRC */
+            set(arg1, cast(short)mem[ES + (arg2 << 8) + arg3]);
+            break;
 
-        case 0x0D:                 /* PUSH */
-            writeln("PUSH");
+        case 0x0F:                 /* PUSH */
             mem[SS + RSP] = cast(byte)get(arg1);
             RSP--;
             mem[SS + RSP] = cast(byte)(get(arg1) >> 8);
             RSP--;
             break;
-        case 0x8D:                 /* CPUSH */
+        case 0x8F:                 /* СPUSH */
             mem[SS + RSP] = arg2;
             RSP--;
             mem[SS + RSP] = arg1;
             RSP--;
             break;
-        case 0x4D:  /* 01001101 */ /* PUSHB */
+        case 0x4F:                 /* PUSHB */
             mem[SS + RSP] = cast(byte)get(arg1);
             RSP--;
             break;
-        case 0xCD:  /* 11001101 */ /* CPUSHB */
+        case 0xCF:                 /* СPUSHB */
             mem[SS + RSP] = arg1;
             RSP--;
             break;
-        case 0x0E:                 /* POP */
+        case 0x10:                 /* POP */
             RSP++;
-            set(arg1, cast(short)((mem[SS + RSP] << 8) + mem[SS + ++RSP]));
+            set(arg1, cast(ushort)((mem[SS + RSP++] << 8) + mem[SS + RSP]));
             break;
-        case 0x4E:  /* 01001110 */ /* POPB */
+        case 0x50: /* 01010000 */ /* POPB */
             RSP++;
-            set(arg1, cast(short)(mem[SS + RSP]));
+            set(arg1, cast(ushort)mem[SS + RSP]);
             break;
         
-        default: break;
+        default: return 0;
     }
+    return 0;
 }
 
 void set(int num, short val)
@@ -231,12 +301,18 @@ void set(int num, short val)
         case 0x60:
             SS = val;
             return;
-
         case 0x70:
+            ES = val;
+            return;
+
+        case 0x80:
             IP = val;
             return;
-        case 0x80:
+        case 0x90:
             RSP = val;
+            return;
+        case 0xA0:
+            RBP = val;
             return;
         
         default: break;
@@ -280,11 +356,15 @@ short get(int num)
             return DS;
         case 0x60:
             return SS;
-        
         case 0x70:
-            return IP;
+            return ES;
+        
         case 0x80:
+            return IP;
+        case 0x90:
             return RSP;
+        case 0xA0:
+            return RBP;
         
         default: break;
     }
