@@ -46,7 +46,7 @@ int main(string[] args)
         mem[(current_segment*segment_size) + addr] = start_program[i];
     }
     for (int i = 0; i < 8; i++) {
-        std.file.write(format("mem%x.txt", i), mem[segment_size*i..segment_size*(i+1)]);
+        std.file.write(format("memsectors/mem%x.memb", i), mem[segment_size*i..segment_size*(i+1)]);
     }
 
     writeln(format("\n %X \n", mem[segment_size]));
